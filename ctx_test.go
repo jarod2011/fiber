@@ -23,12 +23,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"text/template"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/gofiber/fiber/v3/internal/storage/memory"
 	"github.com/gofiber/utils/v2"
+	"github.com/shamaton/msgpack/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/valyala/bytebufferpool"
 	"github.com/valyala/fasthttp"
@@ -39,7 +42,10 @@ const epsilon = 0.001
 // go test -run Test_Ctx_Accepts
 func Test_Ctx_Accepts(t *testing.T) {
 	t.Parallel()
-	app := New()
+	app := New(Config{
+		CBOREncoder: cbor.Marshal,
+		CBORDecoder: cbor.Unmarshal,
+	})
 	c := app.AcquireCtx(&fasthttp.RequestCtx{})
 
 	c.Request().Header.Set(HeaderAccept, "text/html,application/xhtml+xml,application/xml;q=0.9")
@@ -69,7 +75,10 @@ func Test_Ctx_Accepts(t *testing.T) {
 
 // go test -v -run=^$ -bench=Benchmark_Ctx_Accepts -benchmem -count=4
 func Benchmark_Ctx_Accepts(b *testing.B) {
-	app := New()
+	app := New(Config{
+		CBOREncoder: cbor.Marshal,
+		CBORDecoder: cbor.Unmarshal,
+	})
 	c := app.AcquireCtx(&fasthttp.RequestCtx{})
 
 	acceptHeader := "text/html,application/xhtml+xml,application/xml;q=0.9"
@@ -81,7 +90,7 @@ func Benchmark_Ctx_Accepts(b *testing.B) {
 	}
 	expectedResults := []string{".xml", "xml", "application/xml"}
 
-	for i := 0; i < len(acceptValues); i++ {
+	for i := range acceptValues {
 		b.Run(fmt.Sprintf("run-%#v", acceptValues[i]), func(bb *testing.B) {
 			var res string
 			bb.ReportAllocs()
@@ -151,7 +160,10 @@ func Test_Ctx_CustomCtx_and_Method(t *testing.T) {
 // go test -run Test_Ctx_Accepts_EmptyAccept
 func Test_Ctx_Accepts_EmptyAccept(t *testing.T) {
 	t.Parallel()
-	app := New()
+	app := New(Config{
+		CBOREncoder: cbor.Marshal,
+		CBORDecoder: cbor.Unmarshal,
+	})
 	c := app.AcquireCtx(&fasthttp.RequestCtx{})
 
 	require.Equal(t, ".forwarded", c.Accepts(".forwarded"))
@@ -606,8 +618,8 @@ func Test_Ctx_Body_With_Compression(t *testing.T) {
 			c := app.AcquireCtx(&fasthttp.RequestCtx{}).(*DefaultCtx) //nolint:errcheck,forcetypeassert // not needed
 			c.Request().Header.Set("Content-Encoding", tCase.contentEncoding)
 
-			encs := strings.Split(tCase.contentEncoding, ",")
-			for _, enc := range encs {
+			encs := strings.SplitSeq(tCase.contentEncoding, ",")
+			for enc := range encs {
 				enc = strings.TrimSpace(enc)
 				if strings.Contains(tCase.name, "invalid_deflate") && enc == StrDeflate {
 					continue
@@ -842,8 +854,8 @@ func Test_Ctx_Body_With_Compression_Immutable(t *testing.T) {
 			c := app.AcquireCtx(&fasthttp.RequestCtx{}).(*DefaultCtx) //nolint:errcheck,forcetypeassert // not needed
 			c.Request().Header.Set("Content-Encoding", tCase.contentEncoding)
 
-			encs := strings.Split(tCase.contentEncoding, ",")
-			for _, enc := range encs {
+			encs := strings.SplitSeq(tCase.contentEncoding, ",")
+			for enc := range encs {
 				enc = strings.TrimSpace(enc)
 				if strings.Contains(tCase.name, "invalid_deflate") && enc == StrDeflate {
 					continue
@@ -1186,6 +1198,167 @@ func Test_Ctx_Cookie_StrictPartitioned(t *testing.T) {
 	)
 }
 
+// go test -run Test_Ctx_Cookie_SameSite_CaseInsensitive
+func Test_Ctx_Cookie_SameSite_CaseInsensitive(t *testing.T) {
+	t.Parallel()
+	app := New()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		// Test case-insensitive Strict
+		{"Strict lowercase", "strict", "SameSite=Strict"},
+		{"Strict uppercase", "STRICT", "SameSite=Strict"},
+		{"Strict mixed case", "StRiCt", "SameSite=Strict"},
+		{"Strict proper case", "Strict", "SameSite=Strict"},
+
+		// Test case-insensitive Lax
+		{"Lax lowercase", "lax", "SameSite=Lax"},
+		{"Lax uppercase", "LAX", "SameSite=Lax"},
+		{"Lax mixed case", "LaX", "SameSite=Lax"},
+		{"Lax proper case", "Lax", "SameSite=Lax"},
+
+		// Test case-insensitive None
+		{"None lowercase", "none", "SameSite=None"},
+		{"None uppercase", "NONE", "SameSite=None"},
+		{"None mixed case", "NoNe", "SameSite=None"},
+		{"None proper case", "None", "SameSite=None"},
+
+		// Test case-insensitive disabled
+		{"Disabled lowercase", "disabled", ""},
+		{"Disabled uppercase", "DISABLED", ""},
+		{"Disabled mixed case", "DiSaBlEd", ""},
+		{"Disabled proper case", "disabled", ""},
+
+		// Test invalid values default to Lax
+		{"Invalid value", "invalid", "SameSite=Lax"},
+		{"Empty value", "", "SameSite=Lax"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := app.AcquireCtx(&fasthttp.RequestCtx{})
+			defer app.ReleaseCtx(c)
+
+			// Reset response
+			c.Response().Reset()
+
+			cookie := &Cookie{
+				Name:     "test",
+				Value:    "value",
+				SameSite: tc.input,
+			}
+			c.Res().Cookie(cookie)
+
+			setCookieHeader := c.Res().Get(HeaderSetCookie)
+			if tc.expected == "" {
+				// For disabled, SameSite should not appear in the header
+				require.NotContains(t, setCookieHeader, "SameSite")
+			} else {
+				// For all other cases, the expected SameSite should appear
+				require.Contains(t, setCookieHeader, tc.expected)
+			}
+		})
+	}
+}
+
+// go test -run Test_Ctx_Cookie_SameSite_None_Secure
+func Test_Ctx_Cookie_SameSite_None_Secure(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name             string
+		cookie           *Cookie
+		expectedInHeader string
+		shouldBeSecure   bool
+	}{
+		{
+			name: "Empty value",
+			cookie: &Cookie{
+				Name:     "test",
+				Value:    "value",
+				SameSite: "",
+			},
+			expectedInHeader: "SameSite=Lax",
+			shouldBeSecure:   false,
+		},
+		{
+			name: "None uppercase",
+			cookie: &Cookie{
+				Name:     "test",
+				Value:    "value",
+				SameSite: "None",
+			},
+			expectedInHeader: "SameSite=None",
+			shouldBeSecure:   true,
+		},
+		{
+			name: "None lowercase",
+			cookie: &Cookie{
+				Name:     "test",
+				Value:    "value",
+				SameSite: "none",
+			},
+			expectedInHeader: "SameSite=None",
+			shouldBeSecure:   true,
+		},
+		{
+			name: "Lax proper case",
+			cookie: &Cookie{
+				Name:     "test",
+				Value:    "value",
+				SameSite: "Lax",
+			},
+			expectedInHeader: "SameSite=Lax",
+			shouldBeSecure:   false,
+		},
+		{
+			name: "Strict uppercase",
+			cookie: &Cookie{
+				Name:     "test",
+				Value:    "value",
+				SameSite: "STRICT",
+			},
+			expectedInHeader: "SameSite=Strict",
+			shouldBeSecure:   false,
+		},
+		{
+			name: "Disabled Secure",
+			cookie: &Cookie{
+				Name:     "test",
+				Value:    "value",
+				SameSite: "none",
+				Secure:   false,
+			},
+			expectedInHeader: "SameSite=None",
+			shouldBeSecure:   true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			app := New()
+			ctx := app.AcquireCtx(&fasthttp.RequestCtx{})
+			defer app.ReleaseCtx(ctx)
+
+			ctx.Cookie(tc.cookie)
+
+			cookie := string(ctx.Response().Header.PeekCookie(tc.cookie.Name))
+			require.Contains(t, cookie, tc.expectedInHeader)
+
+			if tc.shouldBeSecure {
+				require.Contains(t, cookie, "secure")
+			} else {
+				require.NotContains(t, cookie, "secure")
+			}
+		})
+	}
+}
+
 // go test -v -run=^$ -bench=Benchmark_Ctx_Cookie -benchmem -count=4
 func Benchmark_Ctx_Cookie(b *testing.B) {
 	app := New()
@@ -1223,9 +1396,9 @@ func Test_Ctx_Format(t *testing.T) {
 	formatHandlers := func(types ...string) []ResFmt {
 		fmts := []ResFmt{}
 		for _, t := range types {
-			t := utils.CopyString(t)
-			fmts = append(fmts, ResFmt{MediaType: t, Handler: func(_ Ctx) error {
-				accepted = t
+			typ := utils.CopyString(t)
+			fmts = append(fmts, ResFmt{MediaType: typ, Handler: func(_ Ctx) error {
+				accepted = typ
 				return nil
 			}})
 		}
@@ -1236,12 +1409,14 @@ func Test_Ctx_Format(t *testing.T) {
 	err := c.Res().Format(formatHandlers("application/xhtml+xml", "application/xml", "foo/bar")...)
 	require.Equal(t, "application/xhtml+xml", accepted)
 	require.Equal(t, "application/xhtml+xml", c.GetRespHeader(HeaderContentType))
+	require.Equal(t, "application/xhtml+xml", c.Res().Get(HeaderContentType))
 	require.NoError(t, err)
 	require.NotEqual(t, StatusNotAcceptable, c.Response().StatusCode())
 
 	err = c.Res().Format(formatHandlers("foo/bar;a=b")...)
 	require.Equal(t, "foo/bar;a=b", accepted)
 	require.Equal(t, "foo/bar;a=b", c.GetRespHeader(HeaderContentType))
+	require.Equal(t, "foo/bar;a=b", c.Res().Get(HeaderContentType))
 	require.NoError(t, err)
 	require.NotEqual(t, StatusNotAcceptable, c.Response().StatusCode())
 
@@ -1254,9 +1429,15 @@ func Test_Ctx_Format(t *testing.T) {
 	require.Equal(t, StatusNotAcceptable, c.Response().StatusCode())
 	require.NoError(t, err)
 
+	c.Request().Header.Set(HeaderAccept, MIMEApplicationMsgPack)
+	err = c.Format(ResFmt{MediaType: "text/html", Handler: func(c Ctx) error { return c.SendStatus(StatusOK) }})
+	require.Equal(t, StatusNotAcceptable, c.Response().StatusCode())
+	require.NoError(t, err)
+
 	err = c.Format(formatHandlers("text/html", "default")...)
 	require.Equal(t, "default", accepted)
 	require.Equal(t, "text/html", c.GetRespHeader(HeaderContentType))
+	require.Equal(t, "text/html", c.Res().Get(HeaderContentType))
 	require.NoError(t, err)
 
 	err = c.Format()
@@ -1326,12 +1507,28 @@ func Benchmark_Ctx_Format(b *testing.B) {
 		}
 		require.NoError(b, err)
 	})
+
+	c.Request().Header.Set("Accept", MIMEApplicationMsgPack)
+	b.Run("msgpack", func(b *testing.B) {
+		offers := []ResFmt{
+			{MediaType: "xml", Handler: fail},
+			{MediaType: "html", Handler: fail},
+			{MediaType: MIMEApplicationMsgPack, Handler: ok},
+		}
+		for b.Loop() {
+			err = c.Format(offers...)
+		}
+		require.NoError(b, err)
+	})
 }
 
 // go test -run Test_Ctx_AutoFormat
 func Test_Ctx_AutoFormat(t *testing.T) {
 	t.Parallel()
-	app := New()
+	app := New(Config{
+		MsgPackEncoder: msgpack.Marshal,
+		MsgPackDecoder: msgpack.Unmarshal,
+	})
 	c := app.AcquireCtx(&fasthttp.RequestCtx{})
 
 	c.Request().Header.Set(HeaderAccept, MIMETextPlain)
@@ -1348,6 +1545,14 @@ func Test_Ctx_AutoFormat(t *testing.T) {
 	err = c.AutoFormat("Hello, World!")
 	require.NoError(t, err)
 	require.Equal(t, `"Hello, World!"`, string(c.Response().Body()))
+
+	c.Request().Header.Set(HeaderAccept, MIMEApplicationMsgPack)
+	err = c.AutoFormat("Hello, World!")
+	require.NoError(t, err)
+	require.Equal(t, []byte{
+		0xad, 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x2c,
+		0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64, 0x21,
+	}, c.Response().Body())
 
 	c.Request().Header.Set(HeaderAccept, MIMETextPlain)
 	err = c.Res().AutoFormat(complex(1, 1))
@@ -1377,7 +1582,10 @@ func Test_Ctx_AutoFormat(t *testing.T) {
 
 func Test_Ctx_AutoFormat_Struct(t *testing.T) {
 	t.Parallel()
-	app := New()
+	app := New(Config{
+		MsgPackEncoder: msgpack.Marshal,
+		MsgPackDecoder: msgpack.Unmarshal,
+	})
 	c := app.AcquireCtx(&fasthttp.RequestCtx{})
 
 	type Message struct {
@@ -1398,6 +1606,20 @@ func Test_Ctx_AutoFormat_Struct(t *testing.T) {
 		`{"Sender":"Carol","Recipients":["Alice","Bob"],"Urgency":3}`,
 		string(c.Response().Body()),
 	)
+
+	c.Request().Header.Set(HeaderAccept, MIMEApplicationMsgPack)
+	err = c.AutoFormat(data)
+	require.NoError(t, err)
+
+	require.Equal(t, []byte{
+		// {"Sender":"Carol","Recipients":["Alice","Bob"],"Urgency":3}
+		0x83, 0xa6, 0x53, 0x65, 0x6e, 0x64, 0x65, 0x72, 0xa5, 0x43, 0x61,
+		0x72, 0x6f, 0x6c, 0xaa, 0x52, 0x65, 0x63, 0x69, 0x70, 0x69, 0x65,
+		0x6e, 0x74, 0x73, 0x92, 0xa5, 0x41, 0x6c, 0x69, 0x63, 0x65, 0xa3,
+		0x42, 0x6f, 0x62, 0xa7, 0x55, 0x72, 0x67, 0x65, 0x6e, 0x63, 0x79,
+		0x3,
+	},
+		c.Response().Body())
 
 	c.Request().Header.Set(HeaderAccept, MIMEApplicationXML)
 	err = c.AutoFormat(data)
@@ -1454,6 +1676,27 @@ func Benchmark_Ctx_AutoFormat_JSON(b *testing.B) {
 	}
 	require.NoError(b, err)
 	require.Equal(b, `"Hello, World!"`, string(c.Response().Body()))
+}
+
+// go test -v -run=^$ -bench=Benchmark_Ctx_AutoFormat_MsgPack -benchmem -count=4
+func Benchmark_Ctx_AutoFormat_MsgPack(b *testing.B) {
+	app := New(
+		Config{
+			MsgPackEncoder: msgpack.Marshal,
+			MsgPackDecoder: msgpack.Unmarshal,
+		},
+	)
+	c := app.AcquireCtx(&fasthttp.RequestCtx{})
+
+	c.Request().Header.Set("Accept", MIMEApplicationMsgPack)
+	b.ReportAllocs()
+
+	var err error
+	for b.Loop() {
+		err = c.AutoFormat("Hello, World!")
+	}
+	require.NoError(b, err)
+	require.Equal(b, "\xadHello, World!", string(c.Response().Body()))
 }
 
 // go test -v -run=^$ -bench=Benchmark_Ctx_AutoFormat_XML -benchmem -count=4
@@ -2511,9 +2754,9 @@ func Test_Ctx_Locals_Generic(t *testing.T) {
 	t.Parallel()
 	app := New()
 	app.Use(func(c Ctx) error {
-		Locals[string](c, "john", "doe")
-		Locals[int](c, "age", 18)
-		Locals[bool](c, "isHuman", true)
+		Locals(c, "john", "doe")
+		Locals(c, "age", 18)
+		Locals(c, "isHuman", true)
 		return c.Next()
 	})
 	app.Get("/test", func(c Ctx) error {
@@ -2539,7 +2782,7 @@ func Test_Ctx_Locals_GenericCustomStruct(t *testing.T) {
 
 	app := New()
 	app.Use(func(c Ctx) error {
-		Locals[User](c, "user", User{name: "john", age: 18})
+		Locals(c, "user", User{name: "john", age: 18})
 		return c.Next()
 	})
 	app.Use("/test", func(c Ctx) error {
@@ -2841,9 +3084,12 @@ func Test_Ctx_Path(t *testing.T) {
 	app := New(Config{UnescapePath: true})
 	app.Get("/test/:user", func(c Ctx) error {
 		require.Equal(t, "/Test/John", c.Path())
+		require.Equal(t, "/Test/John", string(c.Request().URI().Path()))
 		// not strict && case insensitive
 		require.Equal(t, "/ABC/", c.Path("/ABC/"))
+		require.Equal(t, "/ABC/", string(c.Request().URI().Path()))
 		require.Equal(t, "/test/john/", c.Path("/test/john/"))
+		require.Equal(t, "/test/john/", string(c.Request().URI().Path()))
 		return nil
 	})
 
@@ -2852,6 +3098,7 @@ func Test_Ctx_Path(t *testing.T) {
 		require.Equal(t, "/specialChars/créer", c.Path())
 		// unescape is also working if you set the path afterwards
 		require.Equal(t, "/اختبار/", c.Path("/%D8%A7%D8%AE%D8%AA%D8%A8%D8%A7%D8%B1/"))
+		require.Equal(t, "/اختبار/", string(c.Request().URI().Path()))
 		return nil
 	})
 	resp, err := app.Test(httptest.NewRequest(MethodGet, "/specialChars/cr%C3%A9er", nil))
@@ -3059,7 +3306,7 @@ func Test_Ctx_Query(t *testing.T) {
 	// test with generic
 	require.Equal(t, "john", Query[string](c, "search"))
 	require.Equal(t, "20", Query[string](c, "age"))
-	require.Equal(t, "default", Query[string](c, "unknown", "default"))
+	require.Equal(t, "default", Query(c, "unknown", "default"))
 }
 
 // go test -v -run=^$ -bench=Benchmark_Ctx_Query -benchmem -count=4
@@ -3211,10 +3458,10 @@ func Test_Ctx_SaveFile(t *testing.T) {
 		require.NoError(t, err)
 
 		defer func(file *os.File) {
-			err := file.Close()
-			require.NoError(t, err)
-			err = os.Remove(file.Name())
-			require.NoError(t, err)
+			closeErr := file.Close()
+			require.NoError(t, closeErr)
+			closeErr = os.Remove(file.Name())
+			require.NoError(t, closeErr)
 		}(tempFile)
 		err = c.SaveFile(fh, tempFile.Name())
 		require.NoError(t, err)
@@ -3968,7 +4215,7 @@ func Test_Ctx_JSON(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.JSONEq(t, `{"Age":20,"Name":"Grame"}`, string(c.Response().Body()))
-	require.Equal(t, "application/json", string(c.Response().Header.Peek("content-type")))
+	require.Equal(t, "application/json; charset=utf-8", string(c.Response().Header.Peek("content-type")))
 
 	// Test with ctype
 	err = c.JSON(Map{ // map has no order
@@ -4006,7 +4253,7 @@ func Test_Ctx_JSON(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, `["custom","json"]`, string(c.Response().Body()))
-		require.Equal(t, "application/json", string(c.Response().Header.Peek("content-type")))
+		require.Equal(t, "application/json; charset=utf-8", string(c.Response().Header.Peek("content-type")))
 	})
 }
 
@@ -4032,10 +4279,120 @@ func Benchmark_Ctx_JSON(b *testing.B) {
 	require.JSONEq(b, `{"Name":"Grame","Age":20}`, string(c.Response().Body()))
 }
 
+// go test -run Test_Ctx_MsgPack
+func Test_Ctx_MsgPack(t *testing.T) {
+	t.Parallel()
+
+	app := New(Config{
+		MsgPackEncoder: msgpack.Marshal,
+		MsgPackDecoder: msgpack.Unmarshal,
+	})
+
+	c := app.AcquireCtx(&fasthttp.RequestCtx{})
+
+	err := c.MsgPack(complex(1, 1))
+
+	require.NoError(t, err)
+	require.Equal(t, "\u0600?\xf0\x00\x00\x00\x00\x00\x00?\xf0\x00\x00\x00\x00\x00\x00", string(c.Response().Body()))
+
+	// Test without ctype
+	err = c.MsgPack(Map{ // map has no order
+		"Name": "Grame",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "\x81\xa4Name\xa5Grame", string(c.Response().Body()))
+	require.Equal(t, MIMEApplicationMsgPack, string(c.Response().Header.Peek("content-type")))
+
+	// Test with ctype
+	err = c.MsgPack(Map{ // map has no order
+		"Name": "Grame",
+	}, "application/problem+msgpack")
+	require.NoError(t, err)
+	require.Equal(t, "\x81\xa4Name\xa5Grame", string(c.Response().Body()))
+	require.Equal(t, "application/problem+msgpack", string(c.Response().Header.Peek("content-type")))
+
+	testEmpty := func(v any, r string) {
+		err := c.MsgPack(v)
+		require.NoError(t, err)
+		require.Equal(t, r, string(c.Response().Body()))
+	}
+
+	testEmpty(nil, "\xc0")
+	testEmpty("", "\xa0")
+	testEmpty(0, "\x00")
+	testEmpty([]int{}, "\x90")
+
+	t.Run("custom msgpack encoder", func(t *testing.T) {
+		t.Parallel()
+
+		app := New(Config{
+			MsgPackEncoder: func(_ any) ([]byte, error) {
+				return []byte(`["custom","msgpack"]`), nil
+			},
+		})
+		c := app.AcquireCtx(&fasthttp.RequestCtx{})
+
+		err := c.MsgPack(Map{ // map has no order
+			"Name": "Grame",
+			"Age":  20,
+		})
+		require.NoError(t, err)
+		require.Equal(t, `["custom","msgpack"]`, string(c.Response().Body()))
+		require.Equal(t, MIMEApplicationMsgPack, string(c.Response().Header.Peek("content-type")))
+	})
+
+	t.Run("error msgpack", func(t *testing.T) {
+		t.Parallel()
+
+		app := New(Config{
+			MsgPackEncoder: func(_ any) ([]byte, error) {
+				return []byte("error"), errors.New("msgpack error")
+			},
+		})
+		c := app.AcquireCtx(&fasthttp.RequestCtx{})
+
+		err := c.MsgPack(Map{ // map has no order
+			"Name": "Grame",
+			"Age":  20,
+		})
+		require.Error(t, err)
+	})
+}
+
+// go test -run=^$ -bench=Benchmark_Ctx_MsgPack -benchmem -count=4
+func Benchmark_Ctx_MsgPack(b *testing.B) {
+	app := New(
+		Config{
+			MsgPackEncoder: msgpack.Marshal,
+			MsgPackDecoder: msgpack.Unmarshal,
+		},
+	)
+	c := app.AcquireCtx(&fasthttp.RequestCtx{})
+
+	type SomeStruct struct {
+		Name string
+		Age  uint8
+	}
+	data := SomeStruct{
+		Name: "Grame",
+		Age:  20,
+	}
+	var err error
+	b.ReportAllocs()
+	for b.Loop() {
+		err = c.MsgPack(data)
+	}
+	require.NoError(b, err)
+	require.Equal(b, "\x82\xa4Name\xa5Grame\xa3Age\x14", string(c.Response().Body()))
+}
+
 // go test -run Test_Ctx_CBOR
 func Test_Ctx_CBOR(t *testing.T) {
 	t.Parallel()
-	app := New()
+	app := New(Config{
+		CBOREncoder: cbor.Marshal,
+		CBORDecoder: cbor.Unmarshal,
+	})
 	c := app.AcquireCtx(&fasthttp.RequestCtx{})
 
 	require.Error(t, c.CBOR(complex(1, 1)))
@@ -4064,8 +4421,8 @@ func Test_Ctx_CBOR(t *testing.T) {
 	require.Equal(t, "application/problem+cbor", string(c.Response().Header.Peek("content-type")))
 
 	testEmpty := func(v any, r string) {
-		err := c.CBOR(v)
-		require.NoError(t, err)
+		cbErr := c.CBOR(v)
+		require.NoError(t, cbErr)
 		require.Equal(t, r, hex.EncodeToString(c.Response().Body()))
 	}
 
@@ -4103,7 +4460,10 @@ func Test_Ctx_CBOR(t *testing.T) {
 
 // go test -run=^$ -bench=Benchmark_Ctx_CBOR -benchmem -count=4
 func Benchmark_Ctx_CBOR(b *testing.B) {
-	app := New()
+	app := New(Config{
+		CBOREncoder: cbor.Marshal,
+		CBORDecoder: cbor.Unmarshal,
+	})
 	c := app.AcquireCtx(&fasthttp.RequestCtx{})
 
 	type SomeStruct struct {
@@ -4233,7 +4593,7 @@ func Test_Ctx_XML(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, `<Users><Names>Grame</Names><Names>John</Names><Ages>1</Ages><Ages>12</Ages><Ages>20</Ages></Users>`, string(c.Response().Body()))
-	require.Equal(t, "application/xml", string(c.Response().Header.Peek("content-type")))
+	require.Equal(t, "application/xml; charset=utf-8", string(c.Response().Header.Peek("content-type")))
 
 	testEmpty := func(v any, r string) {
 		err := c.XML(v)
@@ -4269,7 +4629,7 @@ func Test_Ctx_XML(t *testing.T) {
 
 		require.NoError(t, err)
 		require.Equal(t, `<custom>xml</custom>`, string(c.Response().Body()))
-		require.Equal(t, "application/xml", string(c.Response().Header.Peek("content-type")))
+		require.Equal(t, "application/xml; charset=utf-8", string(c.Response().Header.Peek("content-type")))
 	})
 }
 
@@ -4398,7 +4758,7 @@ func Test_Ctx_RenderWithoutLocals(t *testing.T) {
 
 	err := c.Render("./.github/testdata/index.tmpl", Map{})
 	require.NoError(t, err)
-	require.Equal(t, "<h1><no value></h1>", string(c.Response().Body()))
+	require.Equal(t, "<h1></h1>", string(c.Response().Body()))
 }
 
 func Test_Ctx_RenderWithLocals(t *testing.T) {
@@ -4854,8 +5214,8 @@ func Test_Ctx_Render_Go_Template(t *testing.T) {
 	file, err := os.CreateTemp(os.TempDir(), "fiber")
 	require.NoError(t, err)
 	defer func() {
-		err := os.Remove(file.Name())
-		require.NoError(t, err)
+		removeErr := os.Remove(file.Name())
+		require.NoError(t, removeErr)
 	}()
 
 	_, err = file.WriteString("template")
@@ -4958,8 +5318,8 @@ func Test_Ctx_SendStreamWriter(t *testing.T) {
 	err = c.SendStreamWriter(func(w *bufio.Writer) {
 		for lineNum := 1; lineNum <= 5; lineNum++ {
 			fmt.Fprintf(w, "Line %d\n", lineNum)
-			if err := w.Flush(); err != nil {
-				t.Errorf("unexpected error: %s", err)
+			if flushErr := w.Flush(); flushErr != nil {
+				t.Errorf("unexpected error: %s", flushErr)
 				return
 			}
 		}
@@ -4976,26 +5336,34 @@ func Test_Ctx_SendStreamWriter(t *testing.T) {
 func Test_Ctx_SendStreamWriter_Interrupted(t *testing.T) {
 	t.Parallel()
 	app := New()
+	var flushed atomic.Int32
 	app.Get("/", func(c Ctx) error {
 		return c.SendStreamWriter(func(w *bufio.Writer) {
 			for lineNum := 1; lineNum <= 5; lineNum++ {
 				fmt.Fprintf(w, "Line %d\n", lineNum)
 
 				if err := w.Flush(); err != nil {
-					if lineNum < 3 {
+					if lineNum <= 3 {
 						t.Errorf("unexpected error: %s", err)
 					}
 					return
 				}
 
-				time.Sleep(400 * time.Millisecond)
+				if lineNum <= 3 {
+					flushed.Add(1)
+				}
+
+				time.Sleep(500 * time.Millisecond)
 			}
 		})
 	})
 
 	req := httptest.NewRequest(MethodGet, "/", nil)
 	testConfig := TestConfig{
-		Timeout:       1 * time.Second,
+		// allow enough time for three lines to flush before
+		// the test connection is closed but stop before the
+		// fourth line is sent
+		Timeout:       1400 * time.Millisecond,
 		FailOnTimeout: false,
 	}
 	resp, err := app.Test(req, testConfig)
@@ -5006,6 +5374,9 @@ func Test_Ctx_SendStreamWriter_Interrupted(t *testing.T) {
 	require.EqualError(t, err, "unexpected EOF")
 
 	require.Equal(t, "Line 1\nLine 2\nLine 3\n", string(body))
+
+	// ensure the first three lines were successfully flushed
+	require.Equal(t, int32(3), flushed.Load())
 }
 
 // go test -run Test_Ctx_Set
@@ -5071,16 +5442,82 @@ func Test_Ctx_Type(t *testing.T) {
 	c := app.AcquireCtx(&fasthttp.RequestCtx{})
 
 	c.Type(".json")
-	require.Equal(t, "application/json", string(c.Response().Header.Peek("Content-Type")))
+	require.Equal(t, "application/json; charset=utf-8", string(c.Response().Header.Peek("Content-Type")))
 
 	c.Type("json", "utf-8")
 	require.Equal(t, "application/json; charset=utf-8", string(c.Response().Header.Peek("Content-Type")))
 
 	c.Type(".html")
-	require.Equal(t, "text/html", string(c.Response().Header.Peek("Content-Type")))
+	require.Equal(t, "text/html; charset=utf-8", string(c.Response().Header.Peek("Content-Type")))
 
 	c.Type("html", "utf-8")
 	require.Equal(t, "text/html; charset=utf-8", string(c.Response().Header.Peek("Content-Type")))
+
+	// Test other text types get UTF-8 by default
+	c.Type("txt")
+	require.Equal(t, "text/plain; charset=utf-8", string(c.Response().Header.Peek("Content-Type")))
+
+	c.Type("css")
+	require.Equal(t, "text/css; charset=utf-8", string(c.Response().Header.Peek("Content-Type")))
+
+	c.Type("js")
+	require.Equal(t, "text/javascript; charset=utf-8", string(c.Response().Header.Peek("Content-Type")))
+
+	c.Type("xml")
+	require.Equal(t, "application/xml; charset=utf-8", string(c.Response().Header.Peek("Content-Type")))
+
+	// Test binary types don't get charset
+	c.Type("png")
+	require.Equal(t, "image/png", string(c.Response().Header.Peek("Content-Type")))
+
+	c.Type("pdf")
+	require.Equal(t, "application/pdf", string(c.Response().Header.Peek("Content-Type")))
+
+	// Test custom charset override
+	c.Type("html", "iso-8859-1")
+	require.Equal(t, "text/html; charset=iso-8859-1", string(c.Response().Header.Peek("Content-Type")))
+}
+
+// go test -run Test_shouldIncludeCharset
+func Test_shouldIncludeCharset(t *testing.T) {
+	t.Parallel()
+
+	// Test text/* types - should include charset
+	require.True(t, shouldIncludeCharset("text/html"))
+	require.True(t, shouldIncludeCharset("text/plain"))
+	require.True(t, shouldIncludeCharset("text/css"))
+	require.True(t, shouldIncludeCharset("text/javascript"))
+	require.True(t, shouldIncludeCharset("text/xml"))
+
+	// Test explicit application types - should include charset
+	require.True(t, shouldIncludeCharset("application/json"))
+	require.True(t, shouldIncludeCharset("application/javascript"))
+	require.True(t, shouldIncludeCharset("application/xml"))
+
+	// Test +json suffixes - should include charset
+	require.True(t, shouldIncludeCharset("application/problem+json"))
+	require.True(t, shouldIncludeCharset("application/vnd.api+json"))
+	require.True(t, shouldIncludeCharset("application/hal+json"))
+	require.True(t, shouldIncludeCharset("application/merge-patch+json"))
+
+	// Test +xml suffixes - should include charset
+	require.True(t, shouldIncludeCharset("application/soap+xml"))
+	require.True(t, shouldIncludeCharset("application/xhtml+xml"))
+	require.True(t, shouldIncludeCharset("application/atom+xml"))
+	require.True(t, shouldIncludeCharset("application/rss+xml"))
+
+	// Test binary types - should NOT include charset
+	require.False(t, shouldIncludeCharset("image/png"))
+	require.False(t, shouldIncludeCharset("image/jpeg"))
+	require.False(t, shouldIncludeCharset("application/pdf"))
+	require.False(t, shouldIncludeCharset("application/octet-stream"))
+	require.False(t, shouldIncludeCharset("video/mp4"))
+	require.False(t, shouldIncludeCharset("audio/mpeg"))
+
+	// Test other application types - should NOT include charset
+	require.False(t, shouldIncludeCharset("application/cbor"))
+	require.False(t, shouldIncludeCharset("application/x-www-form-urlencoded"))
+	require.False(t, shouldIncludeCharset("application/vnd.msgpack"))
 }
 
 // go test -v  -run=^$ -bench=Benchmark_Ctx_Type -benchmem -count=4
@@ -5343,9 +5780,9 @@ func Benchmark_Ctx_BodyStreamWriter(b *testing.B) {
 	for b.Loop() {
 		ctx.ResetBody()
 		ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
-			for i := 0; i < 10; i++ {
+			for range 10 {
 				_, err = w.Write(user)
-				if err := w.Flush(); err != nil {
+				if flushErr := w.Flush(); flushErr != nil {
 					return
 				}
 			}
@@ -5531,6 +5968,12 @@ func Test_Ctx_GetRespHeaders(t *testing.T) {
 		"Multi":        {"one", "two"},
 		"Test":         {"Hello, World 👋!"},
 	}, c.GetRespHeaders())
+	require.Equal(t, map[string][]string{
+		"Content-Type": {"application/json"},
+		"Foo":          {"bar"},
+		"Multi":        {"one", "two"},
+		"Test":         {"Hello, World 👋!"},
+	}, c.Res().GetHeaders())
 }
 
 func Benchmark_Ctx_GetRespHeaders(b *testing.B) {
@@ -5573,6 +6016,12 @@ func Test_Ctx_GetReqHeaders(t *testing.T) {
 		"Test":         {"Hello, World 👋!"},
 		"Multi":        {"one", "two"},
 	}, c.GetReqHeaders())
+	require.Equal(t, map[string][]string{
+		"Content-Type": {"application/json"},
+		"Foo":          {"bar"},
+		"Test":         {"Hello, World 👋!"},
+		"Multi":        {"one", "two"},
+	}, c.GetHeaders())
 }
 
 func Test_Ctx_Set_SanitizeHeaderValue(t *testing.T) {
