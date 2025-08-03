@@ -39,17 +39,21 @@ func NewSpnegoKrb5AuthenticateMiddleware(cfg *Config) (fiber.Handler, error) {
 			return fmt.Errorf("%w: %w", ErrLookupKeytabFailed, err)
 		}
 		// Create the SPNEGO handler using the keytab
-		handler := spnego.SPNEGOKRB5Authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var handleErr error
+		handler := spnego.SPNEGOKRB5Authenticate(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 			// Set the authenticated identity in the Fiber context
 			setAuthenticatedIdentityToContext(ctx, goidentity.FromHTTPRequestContext(r))
 			// Call the next handler in the chain
-			err = ctx.Next()
+			handleErr = ctx.Next()
 		}), kt, service.Logger(cfg.Log))
 		// Convert Fiber context to HTTP request
-		rawReq, _ := adaptor.ConvertRequest(ctx, true)
+		rawReq, err := adaptor.ConvertRequest(ctx, true)
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrConvertRequestFailed, err)
+		}
 		// Serve the request using the SPNEGO handler
 		handler.ServeHTTP(wrapCtx{ctx}, rawReq)
-		return err
+		return handleErr
 	}, nil
 }
 

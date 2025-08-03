@@ -10,7 +10,7 @@
 - 灵活的keytab查找系统
 - 支持从各种来源动态检索keytab
 - 与Fiber上下文集成用于存储认证身份
-- 可配置的日志记录
+- 可配置日志
 
 ## 安装
 
@@ -24,7 +24,7 @@ go get github.com/gofiber/fiber/v3/middleware/spnego
 package main
 
 import (
-    "log"
+    flog "github.com/gofiber/fiber/v3/log"
     "fmt"
 
     "github.com/jcmturner/gokrb5/v8/keytab"
@@ -44,13 +44,13 @@ func main() {
             return spnego.NewKeytabFileLookupFunc("/path/to/keytab/file.keytab")
         },
         // 可选：设置自定义日志器
-        Log: log.Default(),
+        Log: flog.Default(),
     }
 
     // 创建中间件
     authMiddleware, err := spnego.NewSpnegoKrb5AuthenticateMiddleware(cfg)
     if err != nil {
-        log.Fatalf("创建中间件失败: %v", err)
+        flog.Fatalf("创建中间件失败: %v", err)
     }
 
     // 将中间件应用于受保护的路由

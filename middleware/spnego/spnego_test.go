@@ -39,11 +39,14 @@ func ExampleNewSpnegoKrb5AuthenticateMiddleware() {
 		return c.SendString(fmt.Sprintf("Hello, %s!", identity.UserName()))
 	})
 
-	app.Listen(":3000")
+	if err := app.Listen(":3000"); err != nil {
+		panic(fmt.Errorf("start server failed: %w", err))
+	}
+
+	// Output: Server is running on :3000
 }
 
 func TestNewSpnegoKrb5AuthenticateMiddleware(t *testing.T) {
-	t.Parallel()
 	t.Run("test for keytab lookup function not set", func(t *testing.T) {
 		_, err := NewSpnegoKrb5AuthenticateMiddleware(&Config{})
 		assert.ErrorIs(t, err, ErrConfigInvalidOfKeytabLookupFunctionRequired)
@@ -54,7 +57,7 @@ func TestNewSpnegoKrb5AuthenticateMiddleware(t *testing.T) {
 				return nil, errors.New("mock keytab lookup error")
 			},
 		})
-		assert.Nil(t, err)
+		assert.NoError(t, err)
 		app := fiber.New()
 		app.Get("/authenticate", middleware, func(c fiber.Ctx) error {
 			return c.SendString("authenticated")

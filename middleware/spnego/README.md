@@ -24,9 +24,10 @@ go get github.com/gofiber/fiber/v3/middleware/spnego
 package main
 
 import (
-    "log"
-	
-	"github.com/jcmturner/gokrb5/v8/keytab"
+    flog "github.com/gofiber/fiber/v3/log"
+    "fmt"
+
+    "github.com/jcmturner/gokrb5/v8/keytab"
     "github.com/gofiber/fiber/v3"
     "github.com/gofiber/fiber/v3/middleware/spnego"
 )
@@ -43,13 +44,13 @@ func main() {
             return spnego.NewKeytabFileLookupFunc("/path/to/keytab/file.keytab")
         },
         // Optional: Set a custom logger
-        Log: log.Default(),
+        Log: flog.Default(),
     }
 
     // Create the middleware
     authMiddleware, err := spnego.NewSpnegoKrb5AuthenticateMiddleware(cfg)
     if err != nil {
-        log.Fatalf("Failed to create middleware: %v", err)
+        flog.Fatalf("Failed to create middleware: %v", err)
     }
 
     // Apply the middleware to protected routes

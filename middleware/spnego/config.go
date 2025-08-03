@@ -17,6 +17,9 @@ var ErrConfigInvalidOfKeytabLookupFunctionRequired = errors.New("config invalid:
 // ErrLookupKeytabFailed is returned when the keytab lookup fails
 var ErrLookupKeytabFailed = errors.New("keytab lookup failed")
 
+// ErrConvertRequestFailed is returned when the request conversion to HTTP request fails
+var ErrConvertRequestFailed = errors.New("convert request failed")
+
 // ErrConfigInvalidOfAtLeastOneKeytabFileRequired is returned when no keytab files are provided
 var (
 	ErrConfigInvalidOfAtLeastOneKeytabFileRequired = errors.New("config invalid: at least one keytab file required")
@@ -50,9 +53,7 @@ func NewKeytabFileLookupFunc(keytabFiles ...string) (KeytabLookupFunc, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: file %s load failed: %w", ErrLoadKeytabFileFailed, keytabFile, err)
 		}
-		for _, entry := range kt.Entries {
-			mergeKeytab.Entries = append(mergeKeytab.Entries, entry)
-		}
+		mergeKeytab.Entries = append(mergeKeytab.Entries, kt.Entries...)
 	}
 	return func() (*keytab.Keytab, error) {
 		return &mergeKeytab, nil
