@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/log"
 	"github.com/jcmturner/gokrb5/v8/keytab"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,7 +39,7 @@ func ExampleNewSpnegoKrb5AuthenticateMiddleware() {
 		}
 		return c.SendString(fmt.Sprintf("Hello, %s!", identity.UserName()))
 	})
-
+	log.Info("Server is running on :3000")
 	if err := app.Listen(":3000"); err != nil {
 		panic(fmt.Errorf("start server failed: %w", err))
 	}
@@ -74,16 +75,16 @@ func TestNewSpnegoKrb5AuthenticateMiddleware(t *testing.T) {
 		var keytabFiles []string
 		for i := 0; i < 5; i++ {
 			kt, clean, err := newKeytabTempFile(fmt.Sprintf("HTTP/sso%d.example.com", i), "KRB5.TEST", 18, 19)
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 			t.Cleanup(clean)
 			keytabFiles = append(keytabFiles, kt)
 		}
 		lookupFunc, err := NewKeytabFileLookupFunc(keytabFiles...)
-		assert.Nil(t, err)
+		assert.NoError(t, err)
 		middleware, err := NewSpnegoKrb5AuthenticateMiddleware(&Config{
 			KeytabLookup: lookupFunc,
 		})
-		assert.Nil(t, err)
+		assert.NoError(t, err)
 		app := fiber.New()
 		app.Get("/authenticate", middleware, func(c fiber.Ctx) error {
 			user, ok := GetAuthenticatedIdentityFromContext(c)
@@ -98,7 +99,6 @@ func TestNewSpnegoKrb5AuthenticateMiddleware(t *testing.T) {
 		ctx.Request.SetRequestURI("/authenticate")
 		handler(ctx)
 		require.Equal(t, fasthttp.StatusUnauthorized, ctx.Response.StatusCode())
-		fmt.Println(ctx.Response.Header.String())
 	})
 }
 
@@ -109,10 +109,10 @@ func TestNewKeytabFileLookupFunc(t *testing.T) {
 	})
 	t.Run("test for has invalid keytab file", func(t *testing.T) {
 		kt1, clean, err := newKeytabTempFile("HTTP/sso.example.com", "KRB5.TEST", 18, 19)
-		assert.Nil(t, err)
+		assert.NoError(t, err)
 		t.Cleanup(clean)
 		kt2, clean, err := newBadKeytabTempFile("HTTP/sso1.example.com", "KRB5.TEST", 18, 19)
-		assert.Nil(t, err)
+		assert.NoError(t, err)
 		t.Cleanup(clean)
 		_, err = NewKeytabFileLookupFunc(kt1, kt2)
 		assert.ErrorIs(t, err, ErrLoadKeytabFileFailed)
@@ -121,14 +121,14 @@ func TestNewKeytabFileLookupFunc(t *testing.T) {
 		var keytabFiles []string
 		for i := 0; i < 5; i++ {
 			kt, clean, err := newKeytabTempFile(fmt.Sprintf("HTTP/sso%d.example.com", i), "KRB5.TEST", 18, 19)
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 			t.Cleanup(clean)
 			keytabFiles = append(keytabFiles, kt)
 		}
 		lookupFunc, err := NewKeytabFileLookupFunc(keytabFiles...)
-		assert.Nil(t, err)
+		assert.NoError(t, err)
 		_, err = lookupFunc()
-		assert.Nil(t, err)
+		assert.NoError(t, err)
 	})
 }
 
