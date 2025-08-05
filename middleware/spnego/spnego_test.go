@@ -40,7 +40,17 @@ func ExampleNewSpnegoKrb5AuthenticateMiddleware() {
 		return c.SendString(fmt.Sprintf("Hello, %s!", identity.UserName()))
 	})
 	log.Info("Server is running on :3000")
-	if err := app.Listen(":3000"); err != nil {
+	go func() {
+		<-time.After(time.Second * 1)
+		fmt.Println("use curl -kv --negotiate http://sso.example.local:3000/protected/resource")
+		fmt.Println("if response is 401, execute `klist` to check use kerberos session")
+		<-time.After(time.Second * 2)
+		fmt.Println("close server")
+		if err = app.Shutdown(); err != nil {
+			panic(fmt.Errorf("shutdown server failed: %w", err))
+		}
+	}()
+	if err := app.Listen("sso.example.local:3000"); err != nil {
 		panic(fmt.Errorf("start server failed: %w", err))
 	}
 
